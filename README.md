@@ -5,10 +5,12 @@ A Model Context Protocol (MCP) server that wraps GitHub Enterprise Importer (GEI
 ## Features
 
 - **GitHub → GitHub** migrations
-- **Azure DevOps → GitHub** migrations
+- **Azure DevOps → GitHub** migrations  
 - Natural language interface via MCP
 - Inventory and discovery tools
 - Migration tracking and history
+- **Local (stdio)** and **Remote (HTTP+SSE)** transport support
+- **Azure Container Apps** deployment ready
 
 ## Available Tools
 
@@ -29,7 +31,7 @@ A Model Context Protocol (MCP) server that wraps GitHub Enterprise Importer (GEI
 | `grant_migrator_role` | Grant migrator permissions |
 | `export_inventory_csv` | Export inventory as CSV |
 
-## Setup
+## Local Setup (stdio)
 
 1. Install dependencies:
    ```bash
@@ -59,6 +61,48 @@ A Model Context Protocol (MCP) server that wraps GitHub Enterprise Importer (GEI
    }
    ```
 
+## Remote Setup (HTTP+SSE)
+
+### Run Locally with HTTP
+```bash
+npm run build
+MCP_TRANSPORT=http PORT=3000 npm start
+```
+
+### Docker
+```bash
+docker build -t gei-migration-mcp .
+docker run -p 3000:3000 \
+  -e GITHUB_TOKEN=your-source-pat \
+  -e GH_PAT=your-target-pat \
+  gei-migration-mcp
+```
+
+### Deploy to Azure Container Apps
+```bash
+# Create resource group
+az group create -n gei-migration-rg -l eastus
+
+# Deploy with Bicep
+az deployment group create \
+  -g gei-migration-rg \
+  -f infra/main.bicep \
+  -p githubSourcePat=<source-pat> \
+  -p githubTargetPat=<target-pat>
+```
+
+### Connect MCP Client to Remote Server
+```json
+{
+  "servers": {
+    "gei-migration": {
+      "type": "sse",
+      "url": "https://your-app.azurecontainerapps.io/sse"
+    }
+  }
+}
+```
+
 ## Usage Examples
 
 ```
@@ -70,9 +114,40 @@ A Model Context Protocol (MCP) server that wraps GitHub Enterprise Importer (GEI
 
 ## Environment Variables
 
-- `GITHUB_TOKEN` / `GH_SOURCE_PAT` - PAT for source GitHub org (needs `repo`, `read:org`, `workflow`)
-- `GH_PAT` - PAT for target GitHub org (needs `admin:org`, `repo`, `workflow`)
-- `ADO_PAT` - PAT for Azure DevOps (optional, for ADO migrations)
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `GITHUB_TOKEN` | PAT for source GitHub org | Yes |
+| `GH_PAT` | PAT for target GitHub org | Yes |
+| `ADO_PAT` | PAT for Azure DevOps | No |
+| `MCP_TRANSPORT` | `stdio` (default) or `http` | No |
+| `PORT` | HTTP port (default: 3000) | No |
+
+### PAT Scopes Required
+- **Source PAT**: `repo`, `read:org`, `workflow`
+- **Target PAT**: `admin:org`, `repo`, `workflow`
+- **ADO PAT**: Full access or `Code (Read)`
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  MCP Client (VS Code, Claude Desktop, etc.)                 │
+└─────────────────────┬───────────────────────────────────────┘
+                      │ MCP Protocol (stdio or HTTP+SSE)
+                      ▼
+┌─────────────────────────────────────────────────────────────┐
+│  GEI Migration MCP Server                                   │
+│  ├── Tools (migrate, inventory, status, etc.)               │
+│  ├── Resources (active migrations, history)                 │
+│  └── Prompts (migration planning templates)                 │
+└─────────────────────┬───────────────────────────────────────┘
+                      │ GraphQL / REST APIs
+                      ▼
+┌─────────────────────────────────────────────────────────────┐
+│  GitHub API          │  Azure DevOps API                    │
+│  (GraphQL)           │  (REST)                              │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ## License
 
