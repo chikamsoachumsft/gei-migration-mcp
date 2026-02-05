@@ -88,7 +88,39 @@ az deployment group create \
 
 ### Connect MCP Client to Remote Server
 
-Each user connects with their own credentials as query parameters:
+#### Recommended: HTTP Headers (Secure)
+
+Use HTTP headers with VS Code input prompts for secure credential handling:
+
+```json
+{
+  "servers": {
+    "gei-migration": {
+      "type": "sse",
+      "url": "https://your-app.azurecontainerapps.io/sse",
+      "headers": {
+        "X-GitHub-Source-PAT": "${input:ghSourcePat}",
+        "X-GitHub-Target-PAT": "${input:ghTargetPat}",
+        "X-ADO-PAT": "${input:adoPat}"
+      }
+    }
+  },
+  "inputs": [
+    { "id": "ghSourcePat", "type": "promptString", "description": "GitHub PAT for source org", "password": true },
+    { "id": "ghTargetPat", "type": "promptString", "description": "GitHub PAT for target org", "password": true },
+    { "id": "adoPat", "type": "promptString", "description": "Azure DevOps PAT (optional, press Enter to skip)", "password": true }
+  ]
+}
+```
+
+This approach:
+- Prompts for credentials at runtime (not stored in config files)
+- Sends credentials via HTTP headers (not logged in URLs)
+- Masks input with `password: true`
+
+#### Alternative: Query Parameters
+
+For quick testing, credentials can also be passed as query parameters:
 
 ```json
 {
@@ -101,12 +133,14 @@ Each user connects with their own credentials as query parameters:
 }
 ```
 
-**Query Parameters:**
-| Parameter | Description |
-|-----------|-------------|
-| `gh_source_pat` | PAT for reading source GitHub org |
-| `gh_pat` | PAT for writing to target GitHub org |
-| `ado_pat` | PAT for Azure DevOps (optional) |
+⚠️ **Warning**: Query parameters may appear in logs and browser history. Use headers for production.
+
+**Headers / Query Parameters:**
+| Header | Query Param | Description |
+|--------|-------------|-------------|
+| `X-GitHub-Source-PAT` | `gh_source_pat` | PAT for reading source GitHub org |
+| `X-GitHub-Target-PAT` | `gh_pat` | PAT for writing to target GitHub org |
+| `X-ADO-PAT` | `ado_pat` | PAT for Azure DevOps (optional) |
 
 ## Multi-Tenant Support
 

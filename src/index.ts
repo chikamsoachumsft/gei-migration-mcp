@@ -57,27 +57,37 @@ async function startHttp(port: number) {
   });
 
   // SSE endpoint for MCP connections
-  // Accepts credentials as query parameters:
-  // ?gh_source_pat=xxx&gh_pat=xxx&ado_pat=xxx
+  // Accepts credentials via HTTP headers (preferred) or query parameters (fallback):
+  // Headers: X-GitHub-Source-PAT, X-GitHub-Target-PAT, X-ADO-PAT
+  // Query: ?gh_source_pat=xxx&gh_pat=xxx&ado_pat=xxx
   app.get("/sse", async (req, res) => {
     const sessionId = crypto.randomUUID();
     console.log(`New SSE connection: ${sessionId}`);
     
-    // Extract credentials from query parameters
+    // Extract credentials from headers first (more secure), then fall back to query params
     const credentials: SessionCredentials = {
-      githubSourcePat: req.query.gh_source_pat as string || req.query.github_token as string,
-      githubTargetPat: req.query.gh_pat as string,
-      adoPat: req.query.ado_pat as string,
+      githubSourcePat: 
+        (req.headers['x-github-source-pat'] as string) || 
+        (req.query.gh_source_pat as string) || 
+        (req.query.github_token as string),
+      githubTargetPat: 
+        (req.headers['x-github-target-pat'] as string) || 
+        (req.query.gh_pat as string),
+      adoPat: 
+        (req.headers['x-ado-pat'] as string) || 
+        (req.query.ado_pat as string),
     };
 
     // Check if at least one credential was provided
     const hasCredentials = credentials.githubSourcePat || credentials.githubTargetPat;
+    const credentialSource = req.headers['x-github-source-pat'] || req.headers['x-github-target-pat'] 
+      ? 'headers' : 'query params';
     
     if (hasCredentials) {
       setSessionCredentials(sessionId, credentials);
-      console.log(`Session ${sessionId}: Credentials configured via query params`);
+      console.log(`Session ${sessionId}: Credentials configured via ${credentialSource}`);
     } else {
-      console.log(`Session ${sessionId}: No credentials in query params, will use server defaults`);
+      console.log(`Session ${sessionId}: No credentials provided, will use server defaults`);
     }
 
     // Set current session context
@@ -140,8 +150,11 @@ async function startHttp(port: number) {
     console.log(`  - SSE endpoint: http://0.0.0.0:${port}/sse`);
     console.log(`  - Health check: http://0.0.0.0:${port}/health`);
     console.log("");
-    console.log("To connect with your credentials:");
-    console.log(`  http://0.0.0.0:${port}/sse?gh_source_pat=YOUR_SOURCE_PAT&gh_pat=YOUR_TARGET_PAT`);
+    console.log("Credentials can be provided via:");
+    console.log("  1. HTTP Headers (recommended):");
+    console.log("     X-GitHub-Source-PAT, X-GitHub-Target-PAT, X-ADO-PAT");
+    console.log("  2. Query Parameters (fallback):");
+    console.log(`     ${port}/sse?gh_source_pat=X&gh_pat=Y&ado_pat=Z`);
   });
 }
 
