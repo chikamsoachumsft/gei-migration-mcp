@@ -72,10 +72,7 @@ MCP_TRANSPORT=http PORT=3000 npm start
 ### Docker
 ```bash
 docker build -t gei-migration-mcp .
-docker run -p 3000:3000 \
-  -e GITHUB_TOKEN=your-source-pat \
-  -e GH_PAT=your-target-pat \
-  gei-migration-mcp
+docker run -p 3000:3000 gei-migration-mcp
 ```
 
 ### Deploy to Azure Container Apps
@@ -83,25 +80,41 @@ docker run -p 3000:3000 \
 # Create resource group
 az group create -n gei-migration-rg -l eastus
 
-# Deploy with Bicep
+# Deploy with Bicep (no secrets needed - users provide their own)
 az deployment group create \
   -g gei-migration-rg \
-  -f infra/main.bicep \
-  -p githubSourcePat=<source-pat> \
-  -p githubTargetPat=<target-pat>
+  -f infra/main.bicep
 ```
 
 ### Connect MCP Client to Remote Server
+
+Each user connects with their own credentials as query parameters:
+
 ```json
 {
   "servers": {
     "gei-migration": {
       "type": "sse",
-      "url": "https://your-app.azurecontainerapps.io/sse"
+      "url": "https://your-app.azurecontainerapps.io/sse?gh_source_pat=YOUR_SOURCE_PAT&gh_pat=YOUR_TARGET_PAT"
     }
   }
 }
 ```
+
+**Query Parameters:**
+| Parameter | Description |
+|-----------|-------------|
+| `gh_source_pat` | PAT for reading source GitHub org |
+| `gh_pat` | PAT for writing to target GitHub org |
+| `ado_pat` | PAT for Azure DevOps (optional) |
+
+## Multi-Tenant Support
+
+The server supports multiple concurrent users, each with their own credentials:
+- Each SSE connection creates an isolated session
+- Credentials are stored per-session and never shared
+- Sessions are automatically cleaned up when connections close
+- No credentials are stored on the server - users provide their own
 
 ## Usage Examples
 
@@ -112,7 +125,7 @@ az deployment group create \
 @gei-migration list active migrations
 ```
 
-## Environment Variables
+## Environment Variables (Local/stdio mode)
 
 | Variable | Description | Required |
 |----------|-------------|----------|

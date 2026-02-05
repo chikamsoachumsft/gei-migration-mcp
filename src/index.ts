@@ -5,6 +5,12 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { registerTools } from "./tools/index.js";
 import { registerResources } from "./resources/index.js";
 import { registerPrompts } from "./prompts/index.js";
+import { 
+  setSessionCredentials, 
+  clearSessionCredentials, 
+  setCurrentSession,
+  SessionCredentials 
+} from "./services/session.js";
 import express from "express";
 import cors from "cors";
 
@@ -38,25 +44,57 @@ async function startHttp(port: number) {
 
   // Store active transports for cleanup
   const transports = new Map<string, SSEServerTransport>();
+  const sessionServers = new Map<string, McpServer>();
 
   // Health check endpoint
   app.get("/health", (req, res) => {
-    res.json({ status: "healthy", server: "gei-migration-mcp", version: "1.0.0" });
+    res.json({ 
+      status: "healthy", 
+      server: "gei-migration-mcp", 
+      version: "1.0.0",
+      activeSessions: transports.size
+    });
   });
 
   // SSE endpoint for MCP connections
+  // Accepts credentials as query parameters:
+  // ?gh_source_pat=xxx&gh_pat=xxx&ado_pat=xxx
   app.get("/sse", async (req, res) => {
-    console.log("New SSE connection");
+    const sessionId = crypto.randomUUID();
+    console.log(`New SSE connection: ${sessionId}`);
+    
+    // Extract credentials from query parameters
+    const credentials: SessionCredentials = {
+      githubSourcePat: req.query.gh_source_pat as string || req.query.github_token as string,
+      githubTargetPat: req.query.gh_pat as string,
+      adoPat: req.query.ado_pat as string,
+    };
+
+    // Check if at least one credential was provided
+    const hasCredentials = credentials.githubSourcePat || credentials.githubTargetPat;
+    
+    if (hasCredentials) {
+      setSessionCredentials(sessionId, credentials);
+      console.log(`Session ${sessionId}: Credentials configured via query params`);
+    } else {
+      console.log(`Session ${sessionId}: No credentials in query params, will use server defaults`);
+    }
+
+    // Set current session context
+    setCurrentSession(sessionId);
     
     const server = createServer();
     const transport = new SSEServerTransport("/message", res);
     
-    const sessionId = crypto.randomUUID();
     transports.set(sessionId, transport);
+    sessionServers.set(sessionId, server);
 
     res.on("close", () => {
       console.log(`SSE connection closed: ${sessionId}`);
       transports.delete(sessionId);
+      sessionServers.delete(sessionId);
+      clearSessionCredentials(sessionId);
+      setCurrentSession(undefined);
     });
 
     await server.connect(transport);
@@ -72,6 +110,9 @@ async function startHttp(port: number) {
       return;
     }
 
+    // Set current session context for this request
+    setCurrentSession(sessionId);
+
     try {
       await transport.handlePostMessage(req, res);
     } catch (error) {
@@ -80,10 +121,27 @@ async function startHttp(port: number) {
     }
   });
 
+  // Endpoint to check session credentials
+  app.get("/session/:sessionId", (req, res) => {
+    const sessionId = req.params.sessionId;
+    if (transports.has(sessionId)) {
+      res.json({ 
+        sessionId, 
+        active: true,
+        hasCredentials: true // Don't expose actual credentials
+      });
+    } else {
+      res.status(404).json({ error: "Session not found" });
+    }
+  });
+
   app.listen(port, () => {
     console.log(`GEI Migration MCP Server running on http://0.0.0.0:${port}`);
     console.log(`  - SSE endpoint: http://0.0.0.0:${port}/sse`);
     console.log(`  - Health check: http://0.0.0.0:${port}/health`);
+    console.log("");
+    console.log("To connect with your credentials:");
+    console.log(`  http://0.0.0.0:${port}/sse?gh_source_pat=YOUR_SOURCE_PAT&gh_pat=YOUR_TARGET_PAT`);
   });
 }
 

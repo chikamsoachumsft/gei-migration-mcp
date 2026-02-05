@@ -10,17 +10,8 @@ param location string = resourceGroup().location
 @description('Container image to deploy')
 param containerImage string = 'ghcr.io/chikamsoachumsft/gei-migration-mcp:latest'
 
-@description('GitHub Source PAT (for reading source repos)')
-@secure()
-param githubSourcePat string
-
-@description('GitHub Target PAT (for writing to target org)')
-@secure()
-param githubTargetPat string
-
-@description('Azure DevOps PAT (optional)')
-@secure()
-param adoPat string = 'not-configured'
+// Note: User credentials are now passed per-session via query parameters,
+// not as server-level secrets. This is more secure for multi-tenant use.
 
 // Log Analytics Workspace for Container Apps
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
@@ -66,20 +57,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
           allowedHeaders: ['*']
         }
       }
-      secrets: [
-        {
-          name: 'github-source-pat'
-          value: githubSourcePat
-        }
-        {
-          name: 'github-target-pat'
-          value: githubTargetPat
-        }
-        {
-          name: 'ado-pat'
-          value: adoPat
-        }
-      ]
+      // No secrets needed - credentials are passed per-session via query parameters
     }
     template: {
       containers: [
@@ -98,18 +76,6 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
             {
               name: 'PORT'
               value: '3000'
-            }
-            {
-              name: 'GITHUB_TOKEN'
-              secretRef: 'github-source-pat'
-            }
-            {
-              name: 'GH_PAT'
-              secretRef: 'github-target-pat'
-            }
-            {
-              name: 'ADO_PAT'
-              secretRef: 'ado-pat'
             }
           ]
           probes: [

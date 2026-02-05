@@ -3,7 +3,7 @@ import { z } from "zod";
 import * as github from "../services/github-api.js";
 import * as ado from "../services/ado-api.js";
 import * as state from "../services/state.js";
-import { checkPrerequisites, getGitHubSourcePAT, getADOPAT } from "../services/environment.js";
+import { checkPrerequisites, getGitHubSourcePAT, getADOPAT } from "../services/session.js";
 
 export function registerTools(server: McpServer): void {
   // Check prerequisites

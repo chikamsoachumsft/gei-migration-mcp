@@ -1,5 +1,5 @@
 import { graphql } from "@octokit/graphql";
-import { getGitHubSourcePAT, getGitHubTargetPAT } from "./environment.js";
+import { getGitHubSourcePAT, getGitHubTargetPAT } from "./session.js";
 
 interface Repository {
   name: string;

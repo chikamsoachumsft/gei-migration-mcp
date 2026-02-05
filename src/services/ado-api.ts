@@ -1,4 +1,4 @@
-import { getADOPAT } from "./environment.js";
+import { getADOPAT } from "./session.js";
 
 interface ADOProject {
   id: string;
