@@ -20,7 +20,7 @@ param githubTargetPat string
 
 @description('Azure DevOps PAT (optional)')
 @secure()
-param adoPat string = ''
+param adoPat string = 'not-configured'
 
 // Log Analytics Workspace for Container Apps
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
