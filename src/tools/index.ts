@@ -270,7 +270,8 @@ export function registerTools(server: McpServer): void {
       let accessToken: string;
       
       if (source === "github") {
-        sourceOrgUrl = `https://github.com/${sourceOrg}`;
+        // Migration source URL should be just the base URL, matching gh-gei CLI behavior.
+        sourceOrgUrl = `https://github.com`;
         sourceRepoUrl = `https://github.com/${sourceOrg}/${repoName}`;
         migrationSourceType = "GITHUB_ARCHIVE";
         accessToken = getGitHubSourcePAT(extra.sessionId);
@@ -278,17 +279,22 @@ export function registerTools(server: McpServer): void {
         if (!adoProject) {
           throw new Error("adoProject is required for Azure DevOps migrations");
         }
-        sourceOrgUrl = `https://dev.azure.com/${sourceOrg}`;
+        // Migration source URL should be just the base ADO URL, not including the org name.
+        // The org-specific info is conveyed via sourceRepoUrl in startRepositoryMigration.
+        // This matches how gh-gei CLI constructs it.
+        sourceOrgUrl = `https://dev.azure.com`;
         sourceRepoUrl = `https://dev.azure.com/${sourceOrg}/${adoProject}/_git/${repoName}`;
         migrationSourceType = "AZURE_DEVOPS";
         accessToken = getADOPAT(extra.sessionId);
       }
       
       // Check if we already have a migration source, otherwise create one
-      let migrationSourceId = state.getMigrationSource(sourceOrgUrl);
+      // Use a cache key that includes the source type to avoid collisions
+      const migrationSourceCacheKey = source === "ado" ? `ado:${sourceOrgUrl}` : sourceOrgUrl;
+      let migrationSourceId = state.getMigrationSource(migrationSourceCacheKey);
       if (!migrationSourceId) {
         migrationSourceId = await github.createMigrationSource(targetOrgId, sourceOrgUrl, migrationSourceType, extra.sessionId);
-        state.saveMigrationSource(sourceOrgUrl, migrationSourceId);
+        state.saveMigrationSource(migrationSourceCacheKey, migrationSourceId);
       }
       
       // Start the migration
