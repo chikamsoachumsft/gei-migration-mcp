@@ -26,8 +26,8 @@ interface Migration {
   failureReason?: string;
 }
 
-export async function getRepos(org: string): Promise<Repository[]> {
-  const token = getGitHubSourcePAT();
+export async function getRepos(org: string, sessionId?: string): Promise<Repository[]> {
+  const token = getGitHubSourcePAT(sessionId);
   const gql = graphql.defaults({ headers: { authorization: `token ${token}` } });
   
   const repos: Repository[] = [];
@@ -62,8 +62,8 @@ export async function getRepos(org: string): Promise<Repository[]> {
   return repos;
 }
 
-export async function getReposDetailed(org: string): Promise<DetailedRepository[]> {
-  const token = getGitHubSourcePAT();
+export async function getReposDetailed(org: string, sessionId?: string): Promise<DetailedRepository[]> {
+  const token = getGitHubSourcePAT(sessionId);
   const gql = graphql.defaults({ headers: { authorization: `token ${token}` } });
   
   const repos: DetailedRepository[] = [];
@@ -105,9 +105,10 @@ export async function getReposDetailed(org: string): Promise<DetailedRepository[
 export async function createMigrationSource(
   targetOrgId: string,
   sourceOrgUrl: string,
-  type: "GITHUB_ARCHIVE" | "AZURE_DEVOPS"
+  type: "GITHUB_ARCHIVE" | "AZURE_DEVOPS",
+  sessionId?: string
 ): Promise<string> {
-  const token = getGitHubTargetPAT();
+  const token = getGitHubTargetPAT(sessionId);
   const gql = graphql.defaults({ headers: { authorization: `token ${token}` } });
   
   const response: any = await gql(`
@@ -131,8 +132,8 @@ export async function createMigrationSource(
   return response.createMigrationSource.migrationSource.id;
 }
 
-export async function getOrganizationId(org: string): Promise<string> {
-  const token = getGitHubTargetPAT();
+export async function getOrganizationId(org: string, sessionId?: string): Promise<string> {
+  const token = getGitHubTargetPAT(sessionId);
   const gql = graphql.defaults({ headers: { authorization: `token ${token}` } });
   
   const response: any = await gql(`
@@ -150,9 +151,10 @@ export async function startRepositoryMigration(
   migrationSourceId: string,
   sourceRepoUrl: string,
   targetRepoName: string,
-  accessToken: string
+  accessToken: string,
+  sessionId?: string
 ): Promise<string> {
-  const token = getGitHubTargetPAT();
+  const token = getGitHubTargetPAT(sessionId);
   const gql = graphql.defaults({ headers: { authorization: `token ${token}` } });
   
   const response: any = await gql(`
@@ -181,8 +183,8 @@ export async function startRepositoryMigration(
   return response.startRepositoryMigration.repositoryMigration.id;
 }
 
-export async function getMigrationStatus(migrationId: string): Promise<Migration> {
-  const token = getGitHubTargetPAT();
+export async function getMigrationStatus(migrationId: string, sessionId?: string): Promise<Migration> {
+  const token = getGitHubTargetPAT(sessionId);
   const gql = graphql.defaults({ headers: { authorization: `token ${token}` } });
   
   const response: any = await gql(`
@@ -202,8 +204,8 @@ export async function getMigrationStatus(migrationId: string): Promise<Migration
   return response.node;
 }
 
-export async function abortMigration(migrationId: string): Promise<boolean> {
-  const token = getGitHubTargetPAT();
+export async function abortMigration(migrationId: string, sessionId?: string): Promise<boolean> {
+  const token = getGitHubTargetPAT(sessionId);
   const gql = graphql.defaults({ headers: { authorization: `token ${token}` } });
   
   await gql(`
@@ -217,11 +219,11 @@ export async function abortMigration(migrationId: string): Promise<boolean> {
   return true;
 }
 
-export async function grantMigratorRole(org: string, actor: string, actorType: "USER" | "TEAM"): Promise<boolean> {
-  const token = getGitHubTargetPAT();
+export async function grantMigratorRole(org: string, actor: string, actorType: "USER" | "TEAM", sessionId?: string): Promise<boolean> {
+  const token = getGitHubTargetPAT(sessionId);
   const gql = graphql.defaults({ headers: { authorization: `token ${token}` } });
   
-  const orgId = await getOrganizationId(org);
+  const orgId = await getOrganizationId(org, sessionId);
   
   await gql(`
     mutation($orgId: ID!, $actor: String!, $actorType: ActorType!) {

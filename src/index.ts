@@ -7,8 +7,8 @@ import { registerResources } from "./resources/index.js";
 import { registerPrompts } from "./prompts/index.js";
 import { 
   setSessionCredentials, 
-  clearSessionCredentials, 
-  setCurrentSession,
+  clearSessionCredentials,
+  getActiveSessionCount,
   SessionCredentials 
 } from "./services/session.js";
 import express from "express";
@@ -52,7 +52,7 @@ async function startHttp(port: number) {
       status: "healthy", 
       server: "gei-migration-mcp", 
       version: "1.0.0",
-      activeSessions: transports.size
+      activeSessions: getActiveSessionCount()
     });
   });
 
@@ -61,7 +61,11 @@ async function startHttp(port: number) {
   // Headers: X-GitHub-Source-PAT, X-GitHub-Target-PAT, X-ADO-PAT
   // Query: ?gh_source_pat=xxx&gh_pat=xxx&ado_pat=xxx
   app.get("/sse", async (req, res) => {
-    const sessionId = crypto.randomUUID();
+    // Create transport first — it generates the canonical sessionId
+    const server = createServer();
+    const transport = new SSEServerTransport("/message", res);
+    const sessionId = transport.sessionId; // SDK-generated UUID — unique per connection
+    
     console.log(`New SSE connection: ${sessionId}`);
     
     // Extract credentials from headers first (more secure), then fall back to query params
@@ -89,12 +93,6 @@ async function startHttp(port: number) {
     } else {
       console.log(`Session ${sessionId}: No credentials provided, will use server defaults`);
     }
-
-    // Set current session context
-    setCurrentSession(sessionId);
-    
-    const server = createServer();
-    const transport = new SSEServerTransport("/message", res);
     
     transports.set(sessionId, transport);
     sessionServers.set(sessionId, server);
@@ -104,7 +102,6 @@ async function startHttp(port: number) {
       transports.delete(sessionId);
       sessionServers.delete(sessionId);
       clearSessionCredentials(sessionId);
-      setCurrentSession(undefined);
     });
 
     await server.connect(transport);
@@ -120,8 +117,8 @@ async function startHttp(port: number) {
       return;
     }
 
-    // Set current session context for this request
-    setCurrentSession(sessionId);
+    // No need to set session context — the MCP SDK passes extra.sessionId
+    // to tool callbacks automatically via transport.sessionId
 
     try {
       await transport.handlePostMessage(req, res);

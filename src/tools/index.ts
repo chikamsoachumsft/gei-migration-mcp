@@ -5,14 +5,20 @@ import * as ado from "../services/ado-api.js";
 import * as state from "../services/state.js";
 import { checkPrerequisites, getGitHubSourcePAT, getADOPAT } from "../services/session.js";
 
+// Type for the extra context the MCP SDK passes to tool callbacks
+interface ToolExtra {
+  sessionId?: string;
+  [key: string]: unknown;
+}
+
 export function registerTools(server: McpServer): void {
   // Check prerequisites
   server.tool(
     "check_prerequisites",
     "Check if required environment variables are configured for migrations",
     {},
-    async () => {
-      const prereqs = checkPrerequisites();
+    async (_, extra: ToolExtra) => {
+      const prereqs = checkPrerequisites(extra.sessionId);
       return {
         content: [{
           type: "text",
@@ -34,9 +40,9 @@ export function registerTools(server: McpServer): void {
       org: z.string().describe("Organization name"),
       project: z.string().optional().describe("ADO project name (optional, for ADO only)")
     },
-    async ({ source, org, project }) => {
+    async ({ source, org, project }, extra: ToolExtra) => {
       if (source === "github") {
-        const repos = await github.getRepos(org);
+        const repos = await github.getRepos(org, extra.sessionId);
         return {
           content: [{
             type: "text",
@@ -53,7 +59,7 @@ export function registerTools(server: McpServer): void {
           }]
         };
       } else {
-        const repos = await ado.getRepos(org, project);
+        const repos = await ado.getRepos(org, project, extra.sessionId);
         return {
           content: [{
             type: "text",
@@ -79,8 +85,8 @@ export function registerTools(server: McpServer): void {
     {
       org: z.string().describe("GitHub organization name")
     },
-    async ({ org }) => {
-      const repos = await github.getReposDetailed(org);
+    async ({ org }, extra: ToolExtra) => {
+      const repos = await github.getReposDetailed(org, extra.sessionId);
       const totalSize = repos.reduce((sum, r) => sum + r.diskUsage, 0);
       const archived = repos.filter(r => r.isArchived).length;
       const forks = repos.filter(r => r.isFork).length;
@@ -121,8 +127,8 @@ export function registerTools(server: McpServer): void {
     {
       org: z.string().describe("Azure DevOps organization name")
     },
-    async ({ org }) => {
-      const inventory = await ado.getDetailedInventory(org);
+    async ({ org }, extra: ToolExtra) => {
+      const inventory = await ado.getDetailedInventory(org, extra.sessionId);
       return {
         content: [{
           type: "text",
@@ -141,9 +147,9 @@ export function registerTools(server: McpServer): void {
       org: z.string().describe("Organization name"),
       thresholdMB: z.number().default(1000).describe("Size threshold in MB")
     },
-    async ({ source, org, thresholdMB }) => {
+    async ({ source, org, thresholdMB }, extra: ToolExtra) => {
       if (source === "github") {
-        const repos = await github.getReposDetailed(org);
+        const repos = await github.getReposDetailed(org, extra.sessionId);
         const large = repos
           .filter(r => r.diskUsage / 1024 > thresholdMB)
           .sort((a, b) => b.diskUsage - a.diskUsage);
@@ -161,7 +167,7 @@ export function registerTools(server: McpServer): void {
           }]
         };
       } else {
-        const inventory = await ado.getDetailedInventory(org);
+        const inventory = await ado.getDetailedInventory(org, extra.sessionId);
         const thresholdBytes = thresholdMB * 1024 * 1024;
         const large = inventory.repositories
           .filter(r => r.size > thresholdBytes)
@@ -193,12 +199,12 @@ export function registerTools(server: McpServer): void {
       org: z.string().describe("Organization name"),
       daysInactive: z.number().default(365).describe("Days since last activity")
     },
-    async ({ source, org, daysInactive }) => {
+    async ({ source, org, daysInactive }, extra: ToolExtra) => {
       const cutoff = new Date();
       cutoff.setDate(cutoff.getDate() - daysInactive);
       
       if (source === "github") {
-        const repos = await github.getReposDetailed(org);
+        const repos = await github.getReposDetailed(org, extra.sessionId);
         const stale = repos
           .filter(r => new Date(r.pushedAt) < cutoff)
           .sort((a, b) => new Date(a.pushedAt).getTime() - new Date(b.pushedAt).getTime());
@@ -217,7 +223,7 @@ export function registerTools(server: McpServer): void {
           }]
         };
       } else {
-        const inventory = await ado.getDetailedInventory(org);
+        const inventory = await ado.getDetailedInventory(org, extra.sessionId);
         const stale = inventory.repositories
           .filter(r => r.lastCommitDate && new Date(r.lastCommitDate) < cutoff)
           .sort((a, b) => new Date(a.lastCommitDate!).getTime() - new Date(b.lastCommitDate!).getTime());
@@ -251,11 +257,11 @@ export function registerTools(server: McpServer): void {
       targetRepoName: z.string().optional().describe("New repository name (defaults to same name)"),
       adoProject: z.string().optional().describe("ADO project name (required for ADO source)")
     },
-    async ({ source, sourceOrg, repoName, targetOrg, targetRepoName, adoProject }) => {
+    async ({ source, sourceOrg, repoName, targetOrg, targetRepoName, adoProject }, extra: ToolExtra) => {
       const finalRepoName = targetRepoName || repoName;
       
       // Get target org ID
-      const targetOrgId = await github.getOrganizationId(targetOrg);
+      const targetOrgId = await github.getOrganizationId(targetOrg, extra.sessionId);
       
       // Build source URL
       let sourceOrgUrl: string;
@@ -267,7 +273,7 @@ export function registerTools(server: McpServer): void {
         sourceOrgUrl = `https://github.com/${sourceOrg}`;
         sourceRepoUrl = `https://github.com/${sourceOrg}/${repoName}`;
         migrationSourceType = "GITHUB_ARCHIVE";
-        accessToken = getGitHubSourcePAT();
+        accessToken = getGitHubSourcePAT(extra.sessionId);
       } else {
         if (!adoProject) {
           throw new Error("adoProject is required for Azure DevOps migrations");
@@ -275,13 +281,13 @@ export function registerTools(server: McpServer): void {
         sourceOrgUrl = `https://dev.azure.com/${sourceOrg}`;
         sourceRepoUrl = `https://dev.azure.com/${sourceOrg}/${adoProject}/_git/${repoName}`;
         migrationSourceType = "AZURE_DEVOPS";
-        accessToken = getADOPAT();
+        accessToken = getADOPAT(extra.sessionId);
       }
       
       // Check if we already have a migration source, otherwise create one
       let migrationSourceId = state.getMigrationSource(sourceOrgUrl);
       if (!migrationSourceId) {
-        migrationSourceId = await github.createMigrationSource(targetOrgId, sourceOrgUrl, migrationSourceType);
+        migrationSourceId = await github.createMigrationSource(targetOrgId, sourceOrgUrl, migrationSourceType, extra.sessionId);
         state.saveMigrationSource(sourceOrgUrl, migrationSourceId);
       }
       
@@ -292,7 +298,8 @@ export function registerTools(server: McpServer): void {
         migrationSourceId,
         sourceRepoUrl,
         finalRepoName,
-        accessToken
+        accessToken,
+        extra.sessionId
       );
       
       // Record the migration
@@ -327,8 +334,8 @@ export function registerTools(server: McpServer): void {
     {
       migrationId: z.string().describe("The migration ID to check")
     },
-    async ({ migrationId }) => {
-      const status = await github.getMigrationStatus(migrationId);
+    async ({ migrationId }, extra: ToolExtra) => {
+      const status = await github.getMigrationStatus(migrationId, extra.sessionId);
       state.updateMigrationState(migrationId, status.state);
       
       return {
@@ -345,14 +352,14 @@ export function registerTools(server: McpServer): void {
     "list_active_migrations",
     "List all currently active migrations",
     {},
-    async () => {
+    async (_, extra: ToolExtra) => {
       const active = state.getActiveMigrations();
       
       // Update statuses
       const updated = await Promise.all(
         active.map(async (m) => {
           try {
-            const status = await github.getMigrationStatus(m.id);
+            const status = await github.getMigrationStatus(m.id, extra.sessionId);
             state.updateMigrationState(m.id, status.state);
             return { ...m, state: status.state };
           } catch {
@@ -381,12 +388,12 @@ export function registerTools(server: McpServer): void {
       migrationId: z.string().describe("The migration ID to wait for"),
       timeoutMinutes: z.number().default(30).describe("Maximum minutes to wait")
     },
-    async ({ migrationId, timeoutMinutes }) => {
+    async ({ migrationId, timeoutMinutes }, extra: ToolExtra) => {
       const startTime = Date.now();
       const timeoutMs = timeoutMinutes * 60 * 1000;
       
       while (Date.now() - startTime < timeoutMs) {
-        const status = await github.getMigrationStatus(migrationId);
+        const status = await github.getMigrationStatus(migrationId, extra.sessionId);
         state.updateMigrationState(migrationId, status.state);
         
         if (["SUCCEEDED", "FAILED", "FAILED_VALIDATION"].includes(status.state)) {
@@ -426,8 +433,8 @@ export function registerTools(server: McpServer): void {
     {
       migrationId: z.string().describe("The migration ID to abort")
     },
-    async ({ migrationId }) => {
-      await github.abortMigration(migrationId);
+    async ({ migrationId }, extra: ToolExtra) => {
+      await github.abortMigration(migrationId, extra.sessionId);
       state.updateMigrationState(migrationId, "ABORTED");
       
       return {
@@ -449,7 +456,7 @@ export function registerTools(server: McpServer): void {
     {
       limit: z.number().default(50).describe("Maximum number of records to return")
     },
-    async ({ limit }) => {
+    async ({ limit }, extra: ToolExtra) => {
       const history = state.getMigrationHistory().slice(-limit);
       
       return {
@@ -473,8 +480,8 @@ export function registerTools(server: McpServer): void {
       actor: z.string().describe("Username or team name"),
       actorType: z.enum(["USER", "TEAM"]).describe("Whether the actor is a user or team")
     },
-    async ({ org, actor, actorType }) => {
-      await github.grantMigratorRole(org, actor, actorType);
+    async ({ org, actor, actorType }, extra: ToolExtra) => {
+      await github.grantMigratorRole(org, actor, actorType, extra.sessionId);
       
       return {
         content: [{
@@ -496,9 +503,9 @@ export function registerTools(server: McpServer): void {
       source: z.enum(["github", "ado"]).describe("Source platform"),
       org: z.string().describe("Organization name")
     },
-    async ({ source, org }) => {
+    async ({ source, org }, extra: ToolExtra) => {
       if (source === "github") {
-        const repos = await github.getReposDetailed(org);
+        const repos = await github.getReposDetailed(org, extra.sessionId);
         const csv = [
           "Name,URL,Archived,Private,Fork,SizeMB,LastPush,DefaultBranch,Languages",
           ...repos.map(r => 
@@ -513,7 +520,7 @@ export function registerTools(server: McpServer): void {
           }]
         };
       } else {
-        const inventory = await ado.getDetailedInventory(org);
+        const inventory = await ado.getDetailedInventory(org, extra.sessionId);
         const csv = [
           "Name,Project,URL,SizeMB,LastCommit,DefaultBranch",
           ...inventory.repositories.map(r =>

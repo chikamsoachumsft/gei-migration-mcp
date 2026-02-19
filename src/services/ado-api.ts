@@ -22,8 +22,8 @@ interface DetailedADORepository extends ADORepository {
   isDisabled: boolean;
 }
 
-export async function getProjects(adoOrg: string): Promise<ADOProject[]> {
-  const token = getADOPAT();
+export async function getProjects(adoOrg: string, sessionId?: string): Promise<ADOProject[]> {
+  const token = getADOPAT(sessionId);
   const auth = Buffer.from(`:${token}`).toString("base64");
   
   const response = await fetch(
@@ -39,8 +39,8 @@ export async function getProjects(adoOrg: string): Promise<ADOProject[]> {
   return data.value;
 }
 
-export async function getRepos(adoOrg: string, project?: string): Promise<ADORepository[]> {
-  const token = getADOPAT();
+export async function getRepos(adoOrg: string, project?: string, sessionId?: string): Promise<ADORepository[]> {
+  const token = getADOPAT(sessionId);
   const auth = Buffer.from(`:${token}`).toString("base64");
   
   const projectPath = project ? `${project}/` : "";
@@ -57,9 +57,9 @@ export async function getRepos(adoOrg: string, project?: string): Promise<ADORep
   return data.value;
 }
 
-export async function getReposDetailed(adoOrg: string, project?: string): Promise<DetailedADORepository[]> {
-  const repos = await getRepos(adoOrg, project);
-  const token = getADOPAT();
+export async function getReposDetailed(adoOrg: string, project?: string, sessionId?: string): Promise<DetailedADORepository[]> {
+  const repos = await getRepos(adoOrg, project, sessionId);
+  const token = getADOPAT(sessionId);
   const auth = Buffer.from(`:${token}`).toString("base64");
   
   const detailed: DetailedADORepository[] = [];
@@ -93,7 +93,7 @@ export async function getReposDetailed(adoOrg: string, project?: string): Promis
   return detailed;
 }
 
-export async function getDetailedInventory(adoOrg: string): Promise<{
+export async function getDetailedInventory(adoOrg: string, sessionId?: string): Promise<{
   projects: ADOProject[];
   repositories: DetailedADORepository[];
   summary: {
@@ -103,12 +103,12 @@ export async function getDetailedInventory(adoOrg: string): Promise<{
     reposByProject: Record<string, number>;
   };
 }> {
-  const projects = await getProjects(adoOrg);
+  const projects = await getProjects(adoOrg, sessionId);
   const repositories: DetailedADORepository[] = [];
   const reposByProject: Record<string, number> = {};
   
   for (const project of projects) {
-    const projectRepos = await getReposDetailed(adoOrg, project.name);
+    const projectRepos = await getReposDetailed(adoOrg, project.name, sessionId);
     repositories.push(...projectRepos);
     reposByProject[project.name] = projectRepos.length;
   }

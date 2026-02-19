@@ -1,12 +1,15 @@
 // Session-based credentials store for multi-tenant support
+// Each SSE connection gets a unique sessionId from the MCP SDK's SSEServerTransport.
+// That sessionId is passed through to every tool callback via `extra.sessionId`,
+// so we never need a global "current session" variable — no race conditions.
+
 export interface SessionCredentials {
   githubSourcePat?: string;
   githubTargetPat?: string;
   adoPat?: string;
 }
 
-// Global session store (in-memory for simplicity)
-// In production, consider Redis for multi-instance deployments
+// Credential store keyed by MCP SDK transport sessionId
 const sessionCredentials = new Map<string, SessionCredentials>();
 
 export function setSessionCredentials(sessionId: string, credentials: SessionCredentials): void {
@@ -21,22 +24,17 @@ export function clearSessionCredentials(sessionId: string): void {
   sessionCredentials.delete(sessionId);
 }
 
-// Current session context (set per-request in HTTP mode)
-let currentSessionId: string | undefined;
-
-export function setCurrentSession(sessionId: string | undefined): void {
-  currentSessionId = sessionId;
+export function getActiveSessionCount(): number {
+  return sessionCredentials.size;
 }
 
-export function getCurrentSession(): string | undefined {
-  return currentSessionId;
-}
+// Credential resolvers — accept sessionId explicitly (no global state).
+// In HTTP/SSE mode, sessionId comes from extra.sessionId in tool callbacks.
+// In stdio mode, sessionId is undefined, so we fall back to environment variables.
 
-// Get credentials for current session, falling back to environment variables
-export function getGitHubSourcePAT(): string {
-  // First try session credentials
-  if (currentSessionId) {
-    const creds = sessionCredentials.get(currentSessionId);
+export function getGitHubSourcePAT(sessionId?: string): string {
+  if (sessionId) {
+    const creds = sessionCredentials.get(sessionId);
     if (creds?.githubSourcePat) {
       return creds.githubSourcePat;
     }
@@ -45,14 +43,14 @@ export function getGitHubSourcePAT(): string {
   // Fall back to environment variables (for stdio mode or if not set per-session)
   const token = process.env.GH_SOURCE_PAT || process.env.GITHUB_TOKEN;
   if (!token) {
-    throw new Error("GitHub source PAT not configured. Please provide GH_SOURCE_PAT when connecting.");
+    throw new Error("GitHub source PAT not configured. Provide via X-GitHub-Source-PAT header or GITHUB_TOKEN env var.");
   }
   return token;
 }
 
-export function getGitHubTargetPAT(): string {
-  if (currentSessionId) {
-    const creds = sessionCredentials.get(currentSessionId);
+export function getGitHubTargetPAT(sessionId?: string): string {
+  if (sessionId) {
+    const creds = sessionCredentials.get(sessionId);
     if (creds?.githubTargetPat) {
       return creds.githubTargetPat;
     }
@@ -60,14 +58,14 @@ export function getGitHubTargetPAT(): string {
   
   const token = process.env.GH_PAT || process.env.GITHUB_TOKEN;
   if (!token) {
-    throw new Error("GitHub target PAT not configured. Please provide GH_PAT when connecting.");
+    throw new Error("GitHub target PAT not configured. Provide via X-GitHub-Target-PAT header or GH_PAT env var.");
   }
   return token;
 }
 
-export function getADOPAT(): string {
-  if (currentSessionId) {
-    const creds = sessionCredentials.get(currentSessionId);
+export function getADOPAT(sessionId?: string): string {
+  if (sessionId) {
+    const creds = sessionCredentials.get(sessionId);
     if (creds?.adoPat) {
       return creds.adoPat;
     }
@@ -75,12 +73,12 @@ export function getADOPAT(): string {
   
   const token = process.env.ADO_PAT;
   if (!token || token === 'not-configured') {
-    throw new Error("Azure DevOps PAT not configured. Please provide ADO_PAT when connecting.");
+    throw new Error("Azure DevOps PAT not configured. Provide via X-ADO-PAT header or ADO_PAT env var.");
   }
   return token;
 }
 
-export function checkPrerequisites(): { 
+export function checkPrerequisites(sessionId?: string): { 
   githubSource: boolean; 
   githubTarget: boolean; 
   ado: boolean;
@@ -94,8 +92,8 @@ export function checkPrerequisites(): {
   let sessionBased = false;
 
   // Check session credentials first
-  if (currentSessionId) {
-    const creds = sessionCredentials.get(currentSessionId);
+  if (sessionId) {
+    const creds = sessionCredentials.get(sessionId);
     if (creds) {
       sessionBased = true;
       githubSource = !!creds.githubSourcePat;
@@ -115,9 +113,9 @@ export function checkPrerequisites(): {
     ado = !!(process.env.ADO_PAT && process.env.ADO_PAT !== 'not-configured');
   }
 
-  if (!githubSource) details.push("Missing: GH_SOURCE_PAT or GITHUB_TOKEN for source GitHub org");
-  if (!githubTarget) details.push("Missing: GH_PAT for target GitHub org");
-  if (!ado) details.push("Missing: ADO_PAT for Azure DevOps (optional if not migrating from ADO)");
+  if (!githubSource) details.push("Missing: GitHub source PAT (X-GitHub-Source-PAT header or GITHUB_TOKEN env)");
+  if (!githubTarget) details.push("Missing: GitHub target PAT (X-GitHub-Target-PAT header or GH_PAT env)");
+  if (!ado) details.push("Missing: ADO PAT (X-ADO-PAT header or ADO_PAT env) — optional if not migrating from ADO");
 
   return { githubSource, githubTarget, ado, details, sessionBased };
 }
