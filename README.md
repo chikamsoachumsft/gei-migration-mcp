@@ -12,6 +12,76 @@ A Model Context Protocol (MCP) server that wraps GitHub Enterprise Importer (GEI
 - **Local (stdio)** and **Remote (HTTP+SSE)** transport support
 - **Azure Container Apps** deployment ready
 
+## Quick Start (Hosted Server)
+
+The MCP server is deployed and ready to use — no installation required. Just add it to your VS Code settings.
+
+### 1. Open MCP Settings
+
+In VS Code, press `Ctrl+Shift+P` → **Preferences: Open MCP Configuration** (or edit your `mcp.json` directly).
+
+### 2. Add the Server
+
+Merge the following into your `mcp.json`:
+
+```jsonc
+{
+  "servers": {
+    "gei-migration": {
+      "type": "sse",
+      "url": "https://gei-migration-mcp.proudgrass-ef996862.eastus.azurecontainerapps.io/sse",
+      "headers": {
+        "X-GitHub-Source-PAT": "${input:gei_github_token}",
+        "X-GitHub-Target-PAT": "${input:gei_target_pat}",
+        "X-ADO-PAT": "${input:gei_ado_pat}"
+      }
+    }
+  },
+  "inputs": [
+    {
+      "id": "gei_github_token",
+      "type": "promptString",
+      "description": "GitHub PAT for source org (needs repo, read:org scopes)",
+      "password": true
+    },
+    {
+      "id": "gei_target_pat",
+      "type": "promptString",
+      "description": "GitHub PAT for target org (needs admin:org, repo, workflow scopes)",
+      "password": true
+    },
+    {
+      "id": "gei_ado_pat",
+      "type": "promptString",
+      "description": "Azure DevOps PAT (optional — press Enter to skip if not doing ADO migrations)",
+      "password": true
+    }
+  ]
+}
+```
+
+### 3. Create Your PATs
+
+| PAT | Scopes Needed | When Needed |
+|-----|---------------|-------------|
+| **Source GitHub PAT** | `repo`, `read:org` | Always (reads source org) |
+| **Target GitHub PAT** | `admin:org`, `repo`, `workflow` | Always (writes to target org) |
+| **ADO PAT** | `Code (Read)`, `Project and Team (Read)` | Only for ADO → GitHub migrations |
+
+> **Note:** VS Code will prompt for your PATs when the server connects. They are sent per-session via HTTP headers and are never stored on the server.
+
+### 4. Start Using
+
+Open Copilot Chat in Agent mode and try:
+
+```
+@gei-migration list repos in github org my-source-org
+@gei-migration migrate repo my-repo from my-source-org to my-target-org
+@gei-migration check migration status
+```
+
+---
+
 ## Available Tools
 
 | Tool | Description |
