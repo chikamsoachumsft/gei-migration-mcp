@@ -5,6 +5,7 @@ import { checkActionsImporterPrereqs, runActionsImporterCommand } from "./docker
 import { getGitHubAccessToken, getGitHubTargetPAT, getADOPAT } from "./session.js";
 import * as adoPipelines from "./ado-pipelines.js";
 import * as converter from "./pipeline-converter.js";
+import * as aiReviewer from "./ai-reviewer.js";
 
 // ─── Shared types ────────────────────────────────────────────────────────────
 
@@ -34,6 +35,8 @@ export interface DryRunResult {
   unsupported: string[];
   manualSteps: string[];
   pipelineId: string;
+  /** Stringified source ADO pipeline definition (for AI review) */
+  sourceDefinition: string;
 }
 
 export interface MigrateResult {
@@ -43,6 +46,8 @@ export interface MigrateResult {
   warnings: string[];
   unsupported: string[];
   pipelineId: string;
+  /** AI validation report (only present when enableAiReview=true) */
+  validationReport?: aiReviewer.ValidationResult;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -120,13 +125,20 @@ export async function dryRunAdo(
   const id = parseInt(pipelineId, 10);
 
   let result: converter.ConversionResult;
+  let sourceDef: unknown;
   if (pipelineType === "release") {
     const def = await adoPipelines.getReleaseDefinition(adoOrg, adoProject, id, sessionId);
+    sourceDef = def;
     result = converter.convertReleasePipeline(def);
   } else {
     const def = await adoPipelines.getBuildDefinition(adoOrg, adoProject, id, sessionId);
+    sourceDef = def;
     result = converter.convertBuildPipeline(def);
   }
+
+  // Use yamlContent if available (YAML pipelines), otherwise JSON-stringify the definition
+  const sourceDefinition = (sourceDef as any)?.yamlContent
+    || JSON.stringify(sourceDef, null, 2);
 
   return {
     workflowYaml: result.workflowYaml,
@@ -135,6 +147,7 @@ export async function dryRunAdo(
     unsupported: result.unsupported,
     manualSteps: result.manualSteps,
     pipelineId,
+    sourceDefinition,
   };
 }
 
@@ -148,10 +161,36 @@ export async function migrateAdoPipeline(
   pipelineId: string,
   targetRepoUrl: string,
   pipelineType: "pipeline" | "release" = "pipeline",
-  sessionId?: string
+  sessionId?: string,
+  enableAiReview: boolean = false,
 ): Promise<MigrateResult> {
   // 1. Convert the pipeline
   const dryRun = await dryRunAdo(adoOrg, adoProject, pipelineId, pipelineType, sessionId);
+
+  // 1b. Optional AI review — may update yaml and surface additional manual steps
+  let validationReport: aiReviewer.ValidationResult | undefined;
+  let finalYaml = dryRun.workflowYaml;
+  let finalManualSteps = [...dryRun.manualSteps];
+
+  if (enableAiReview) {
+    validationReport = await aiReviewer.validateConversion(
+      dryRun.sourceDefinition,
+      dryRun.workflowYaml,
+      dryRun.warnings,
+      dryRun.unsupported,
+      dryRun.manualSteps,
+    );
+
+    // Apply auto-fixed YAML if available
+    finalYaml = aiReviewer.getFinalYaml(dryRun.workflowYaml, validationReport);
+
+    // Merge AI-discovered human-only steps with existing manual steps
+    for (const step of validationReport.humanOnlySteps) {
+      if (!finalManualSteps.includes(step)) {
+        finalManualSteps.push(step);
+      }
+    }
+  }
 
   // 2. Parse target repo from URL (e.g. https://github.com/org/repo)
   const urlMatch = targetRepoUrl.match(/github\.com\/([^/]+)\/([^/]+)/);
@@ -180,7 +219,7 @@ export async function migrateAdoPipeline(
 
   // 5. Create the workflow file on the new branch
   const filePath = `.github/workflows/${dryRun.suggestedFilename}`;
-  const contentB64 = Buffer.from(dryRun.workflowYaml, "utf-8").toString("base64");
+  const contentB64 = Buffer.from(finalYaml, "utf-8").toString("base64");
   await ghRestPut(
     `https://api.github.com/repos/${owner}/${repo}/contents/${filePath}`,
     ghToken,
@@ -192,11 +231,18 @@ export async function migrateAdoPipeline(
   );
 
   // 6. Create a pull request
-  const manualStepsMd = dryRun.manualSteps.length > 0
-    ? "\n\n## Manual Steps\n" + dryRun.manualSteps.map(s => `- [ ] ${s}`).join("\n")
+  const manualStepsMd = finalManualSteps.length > 0
+    ? "\n\n## Manual Steps\n" + finalManualSteps.map(s => `- [ ] ${s}`).join("\n")
     : "";
   const unsupportedMd = dryRun.unsupported.length > 0
     ? "\n\n## Unsupported Items\n" + dryRun.unsupported.map(s => `- ${s}`).join("\n")
+    : "";
+  const aiReviewMd = validationReport
+    ? `\n\n## AI Review\n${validationReport.reviewSummary}\n\n` +
+      (validationReport.issues.length > 0
+        ? "### Issues Found\n" + validationReport.issues.map(i => `- **${i.severity}**: ${i.description}${i.location ? ` (${i.location})` : ""}`).join("\n") + "\n"
+        : "No issues found.\n") +
+      `\n_Reviewed in ${validationReport.iterations} iteration(s)._`
     : "";
 
   const pr = await ghRestPost(
@@ -204,7 +250,7 @@ export async function migrateAdoPipeline(
     ghToken,
     {
       title: `Import ADO ${pipelineType} ${pipelineId} as GitHub Actions workflow`,
-      body: `Converted from Azure DevOps ${pipelineType} **${pipelineId}** in \`${adoOrg}/${adoProject}\`.${manualStepsMd}${unsupportedMd}`,
+      body: `Converted from Azure DevOps ${pipelineType} **${pipelineId}** in \`${adoOrg}/${adoProject}\`.${manualStepsMd}${unsupportedMd}${aiReviewMd}`,
       head: branchName,
       base: defaultBranch,
     }
@@ -213,10 +259,11 @@ export async function migrateAdoPipeline(
   return {
     pullRequestUrl: pr.html_url || "",
     suggestedFilename: dryRun.suggestedFilename,
-    manualSteps: dryRun.manualSteps,
+    manualSteps: finalManualSteps,
     warnings: dryRun.warnings,
     unsupported: dryRun.unsupported,
     pipelineId,
+    validationReport,
   };
 }
 

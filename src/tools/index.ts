@@ -259,16 +259,18 @@ export function registerTools(server: McpServer): void {
   // Migrate repository
   server.tool(
     "migrate_repo",
-    "Start a migration for a single repository",
+    "Start a migration for a single repository. IMPORTANT: Always ask the user if they want to include pipeline migration (set includePipelineMigration=true) before starting the migration.",
     {
       source: z.enum(["github", "ado"]).describe("Source platform"),
       sourceOrg: z.string().describe("Source organization name"),
       repoName: z.string().describe("Repository name to migrate"),
       targetOrg: z.string().describe("Target GitHub organization"),
       targetRepoName: z.string().optional().describe("New repository name (defaults to same name)"),
-      adoProject: z.string().optional().describe("ADO project name (required for ADO source)")
+      adoProject: z.string().optional().describe("ADO project name (required for ADO source)"),
+      includePipelineMigration: z.boolean().default(false).describe("When true, automatically migrates pipelines after repo migration completes. For ADO: converts ADO pipelines to GitHub Actions and creates PRs. For GitHub: copies existing workflow files."),
+      enableAiReview: z.boolean().default(false).describe("Enable AI validation of converted pipelines (only applies when includePipelineMigration=true and source is ADO)")
     },
-    async ({ source, sourceOrg, repoName, targetOrg, targetRepoName, adoProject }, extra: ToolExtra) => {
+    async ({ source, sourceOrg, repoName, targetOrg, targetRepoName, adoProject, includePipelineMigration, enableAiReview }, extra: ToolExtra) => {
       const finalRepoName = targetRepoName || repoName;
       
       // Get target org ID
@@ -329,18 +331,173 @@ export function registerTools(server: McpServer): void {
         startedAt: new Date().toISOString(),
         source
       });
-      
+
+      // ── If pipeline migration is NOT requested, return immediately ──
+      if (!includePipelineMigration) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: true,
+              migrationId,
+              message: `Migration started for ${repoName} -> ${targetOrg}/${finalRepoName}`,
+              checkStatus: `Use get_migration_status with migrationId: ${migrationId}`,
+              nextStep: source === "ado"
+                ? "After migration completes, use actions_importer_audit or actions_importer_migrate to import ADO pipelines as GitHub Actions workflows."
+                : "After migration completes, use copy_workflows to copy GitHub Actions workflows from the source repo."
+            }, null, 2)
+          }]
+        };
+      }
+
+      // ── Pipeline migration requested — wait for repo migration, then migrate pipelines ──
+      const timeoutMs = 30 * 60 * 1000; // 30 minutes
+      const startTime = Date.now();
+      let migrationSucceeded = false;
+
+      while (Date.now() - startTime < timeoutMs) {
+        const status = await github.getMigrationStatus(migrationId, extra.sessionId);
+        state.updateMigrationState(migrationId, status.state);
+
+        if (status.state === "SUCCEEDED") {
+          migrationSucceeded = true;
+          break;
+        }
+        if (["FAILED", "FAILED_VALIDATION"].includes(status.state)) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                success: false,
+                migrationId,
+                message: `Repository migration failed with state: ${status.state}. Pipeline migration was skipped.`,
+                status
+              }, null, 2)
+            }]
+          };
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 10000));
+      }
+
+      if (!migrationSucceeded) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: false,
+              migrationId,
+              message: "Repository migration timed out after 30 minutes. Pipeline migration was skipped.",
+              checkStatus: `Use get_migration_status with migrationId: ${migrationId}`
+            }, null, 2)
+          }]
+        };
+      }
+
+      const migrationDuration = Math.round((Date.now() - startTime) / 1000);
+      const targetRepoUrl = `https://github.com/${targetOrg}/${finalRepoName}`;
+
+      // ── ADO source: convert ADO pipelines to GitHub Actions ──
+      if (source === "ado") {
+        const audit = await actionsImporter.auditAdo(sourceOrg, adoProject!, extra.sessionId);
+        const convertible = audit.entries.filter(
+          e => e.conversionStatus === "supported" || e.conversionStatus === "partial"
+        );
+
+        const pipelineResults: Array<{
+          pipelineId: number;
+          pipelineName: string;
+          type: string;
+          success: boolean;
+          pullRequestUrl?: string;
+          error?: string;
+          warnings?: string[];
+          manualSteps?: string[];
+          aiReview?: Record<string, unknown>;
+        }> = [];
+
+        for (const entry of convertible) {
+          try {
+            const pipelineType = entry.type === "classic-release" ? "release" : "pipeline";
+            const result = await actionsImporter.migrateAdoPipeline(
+              sourceOrg,
+              adoProject!,
+              String(entry.pipelineId),
+              targetRepoUrl,
+              pipelineType as "pipeline" | "release",
+              extra.sessionId,
+              enableAiReview
+            );
+            pipelineResults.push({
+              pipelineId: entry.pipelineId,
+              pipelineName: entry.pipelineName,
+              type: entry.type,
+              success: !!result.pullRequestUrl,
+              pullRequestUrl: result.pullRequestUrl,
+              warnings: result.warnings,
+              manualSteps: result.manualSteps,
+              ...(result.validationReport ? {
+                aiReview: {
+                  isCorrect: result.validationReport.isCorrect,
+                  issues: result.validationReport.issues,
+                  humanOnlySteps: result.validationReport.humanOnlySteps,
+                  reviewSummary: result.validationReport.reviewSummary,
+                }
+              } : {})
+            });
+          } catch (err: unknown) {
+            pipelineResults.push({
+              pipelineId: entry.pipelineId,
+              pipelineName: entry.pipelineName,
+              type: entry.type,
+              success: false,
+              error: err instanceof Error ? err.message : String(err)
+            });
+          }
+        }
+
+        const successCount = pipelineResults.filter(r => r.success).length;
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: true,
+              repoMigration: {
+                migrationId,
+                message: `Repository migrated in ${migrationDuration}s: ${repoName} -> ${targetOrg}/${finalRepoName}`,
+              },
+              pipelineMigration: {
+                audited: audit.pipelines.total,
+                convertible: convertible.length,
+                succeeded: successCount,
+                failed: pipelineResults.length - successCount,
+                skippedUnsupported: audit.entries.filter(e => e.conversionStatus === "unsupported").length,
+                results: pipelineResults,
+              }
+            }, null, 2)
+          }]
+        };
+      }
+
+      // ── GitHub source: copy existing workflows ──
+      const copyResult = await workflowCopy.copyWorkflows(sourceOrg, repoName, targetOrg, finalRepoName, extra.sessionId);
+
       return {
         content: [{
           type: "text",
           text: JSON.stringify({
             success: true,
-            migrationId,
-            message: `Migration started for ${repoName} -> ${targetOrg}/${finalRepoName}`,
-            checkStatus: `Use get_migration_status with migrationId: ${migrationId}`,
-            nextStep: source === "ado"
-              ? "After migration completes, use actions_importer_audit or actions_importer_migrate to import ADO pipelines as GitHub Actions workflows."
-              : "After migration completes, use copy_workflows to copy GitHub Actions workflows from the source repo."
+            repoMigration: {
+              migrationId,
+              message: `Repository migrated in ${migrationDuration}s: ${repoName} -> ${targetOrg}/${finalRepoName}`,
+            },
+            workflowCopy: {
+              copied: copyResult.copied,
+              skipped: copyResult.skipped,
+              errors: copyResult.errors,
+              summary: `Copied ${copyResult.copied.length} workflow(s), skipped ${copyResult.skipped.length}, errors ${copyResult.errors.length}`,
+            }
           }, null, 2)
         }]
       };
@@ -630,10 +787,11 @@ export function registerTools(server: McpServer): void {
       adoProject: z.string().describe("Azure DevOps project name"),
       pipelineId: z.string().describe("The ADO pipeline ID to migrate"),
       targetRepoUrl: z.string().describe("Target GitHub repo URL (e.g. https://github.com/org/repo)"),
-      pipelineType: z.enum(["pipeline", "release"]).default("pipeline").describe("Pipeline type: build (pipeline) or release")
+      pipelineType: z.enum(["pipeline", "release"]).default("pipeline").describe("Pipeline type: build (pipeline) or release"),
+      enableAiReview: z.boolean().default(false).describe("Enable AI validation of the converted workflow (uses MCP sampling)")
     },
-    async ({ adoOrg, adoProject, pipelineId, targetRepoUrl, pipelineType }, extra: ToolExtra) => {
-      const result = await actionsImporter.migrateAdoPipeline(adoOrg, adoProject, pipelineId, targetRepoUrl, pipelineType, extra.sessionId);
+    async ({ adoOrg, adoProject, pipelineId, targetRepoUrl, pipelineType, enableAiReview }, extra: ToolExtra) => {
+      const result = await actionsImporter.migrateAdoPipeline(adoOrg, adoProject, pipelineId, targetRepoUrl, pipelineType, extra.sessionId, enableAiReview);
       return {
         content: [{
           type: "text",
@@ -645,6 +803,15 @@ export function registerTools(server: McpServer): void {
             warnings: result.warnings,
             unsupported: result.unsupported,
             manualSteps: result.manualSteps,
+            ...(result.validationReport ? {
+              aiReview: {
+                isCorrect: result.validationReport.isCorrect,
+                issues: result.validationReport.issues,
+                humanOnlySteps: result.validationReport.humanOnlySteps,
+                reviewSummary: result.validationReport.reviewSummary,
+                iterations: result.validationReport.iterations,
+              }
+            } : {}),
             note: result.pullRequestUrl
               ? "PR created. Review the converted workflow and complete any manual steps listed above."
               : "Migration completed but no PR URL was detected."

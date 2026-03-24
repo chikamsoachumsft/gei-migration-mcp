@@ -8,6 +8,7 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { registerTools } from "./tools/index.js";
 import { registerResources } from "./resources/index.js";
 import { registerPrompts } from "./prompts/index.js";
+import { setServer as setAiReviewerServer } from "./services/ai-reviewer.js";
 import { 
   setSessionCredentials, 
   clearSessionCredentials,
@@ -27,6 +28,9 @@ function createServer(): McpServer {
   registerTools(server);
   registerResources(server);
   registerPrompts(server);
+
+  // Give the AI reviewer access to the underlying Server for MCP sampling
+  setAiReviewerServer(server.server);
 
   return server;
 }
