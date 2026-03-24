@@ -49,6 +49,8 @@ export function setServer(server: Server): void {
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const MAX_ITERATIONS = 3;
+const MAX_SAMPLING_RETRIES = 3;
+const SAMPLING_RETRY_DELAY_MS = 5000;
 const MAX_TOKENS = 4096;
 
 const SYSTEM_PROMPT = `You are a senior DevOps engineer reviewing an automated conversion from an Azure DevOps (ADO) pipeline to a GitHub Actions workflow.
@@ -78,6 +80,37 @@ Rules:
 - Do NOT suggest cosmetic/stylistic changes — only flag functional problems.
 - Do NOT flag unsupported tasks that are already documented in the provided warnings list.
 - Keep descriptions concise.`;
+
+// ─── Retry helper ────────────────────────────────────────────────────────────
+
+function isTimeoutError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes("timed out") || msg.includes("-32001");
+}
+
+/**
+ * Call server.createMessage with retry + exponential backoff for timeouts.
+ * Non-timeout errors (e.g. "method not found") are thrown immediately.
+ */
+async function createMessageWithRetry(
+  params: Parameters<Server["createMessage"]>[0],
+): Promise<CreateMessageResult> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= MAX_SAMPLING_RETRIES; attempt++) {
+    try {
+      return await _server!.createMessage(params);
+    } catch (err: unknown) {
+      lastError = err;
+      if (!isTimeoutError(err) || attempt === MAX_SAMPLING_RETRIES) {
+        throw err;
+      }
+      // Exponential backoff: 5s, 10s, 20s…
+      const delay = SAMPLING_RETRY_DELAY_MS * Math.pow(2, attempt - 1);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+  throw lastError;
+}
 
 // ─── Core implementation ─────────────────────────────────────────────────────
 
@@ -111,25 +144,25 @@ export async function validateConversion(
 
     let parsed: ValidationResult;
     try {
-      const response = await _server.createMessage(
-        {
-          messages: [{ role: "user", content: { type: "text", text: userMessage } }],
-          systemPrompt: SYSTEM_PROMPT,
-          maxTokens: MAX_TOKENS,
-          includeContext: "none",
-        },
-      );
+      const response = await createMessageWithRetry({
+        messages: [{ role: "user", content: { type: "text", text: userMessage } }],
+        systemPrompt: SYSTEM_PROMPT,
+        maxTokens: MAX_TOKENS,
+        includeContext: "none",
+      });
 
       parsed = parseResponse(response, iteration);
     } catch (err: unknown) {
-      // Sampling may not be supported by the client — return a graceful fallback
       const msg = err instanceof Error ? err.message : String(err);
+      const isTimeout = msg.includes("timed out") || msg.includes("-32001");
       return {
         isCorrect: false,
         issues: [{ severity: "warning", description: `AI review unavailable: ${msg}` }],
         suggestedFixes: [],
         humanOnlySteps: existingManualSteps,
-        reviewSummary: "AI validation was skipped because the MCP client does not support sampling.",
+        reviewSummary: isTimeout
+          ? "AI validation failed after multiple retry attempts due to timeouts."
+          : "AI validation was skipped because the MCP client does not support sampling.",
         iterations: 0,
       };
     }
