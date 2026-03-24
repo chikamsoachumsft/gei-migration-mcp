@@ -296,7 +296,7 @@ export function registerTools(server: McpServer): void {
         // The org-specific info is conveyed via sourceRepoUrl in startRepositoryMigration.
         // This matches how gh-gei CLI constructs it.
         sourceOrgUrl = `https://dev.azure.com`;
-        sourceRepoUrl = `https://dev.azure.com/${sourceOrg}/${adoProject}/_git/${repoName}`;
+        sourceRepoUrl = `https://dev.azure.com/${encodeURIComponent(sourceOrg)}/${encodeURIComponent(adoProject)}/_git/${encodeURIComponent(repoName)}`;
         migrationSourceType = "AZURE_DEVOPS";
         accessToken = getADOPAT(extra.sessionId);
       }
