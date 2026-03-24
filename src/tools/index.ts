@@ -310,16 +310,38 @@ export function registerTools(server: McpServer): void {
         state.saveMigrationSource(migrationSourceCacheKey, migrationSourceId);
       }
       
-      // Start the migration
-      const migrationId = await github.startRepositoryMigration(
-        sourceOrgUrl,
-        targetOrgId,
-        migrationSourceId,
-        sourceRepoUrl,
-        finalRepoName,
-        accessToken,
-        extra.sessionId
-      );
+      // Start the migration (retry with fresh migration source if cached one is stale)
+      let migrationId: string;
+      try {
+        migrationId = await github.startRepositoryMigration(
+          sourceOrgUrl,
+          targetOrgId,
+          migrationSourceId,
+          sourceRepoUrl,
+          finalRepoName,
+          accessToken,
+          extra.sessionId
+        );
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes("Migration source not found")) {
+          // Cached migration source expired — create a fresh one and retry
+          state.clearMigrationSource(migrationSourceCacheKey);
+          migrationSourceId = await github.createMigrationSource(targetOrgId, sourceOrgUrl, migrationSourceType, extra.sessionId);
+          state.saveMigrationSource(migrationSourceCacheKey, migrationSourceId);
+          migrationId = await github.startRepositoryMigration(
+            sourceOrgUrl,
+            targetOrgId,
+            migrationSourceId,
+            sourceRepoUrl,
+            finalRepoName,
+            accessToken,
+            extra.sessionId
+          );
+        } else {
+          throw err;
+        }
+      }
       
       // Record the migration
       state.addActiveMigration({

@@ -79,3 +79,9 @@ export function getMigrationSource(sourceOrgUrl: string): string | undefined {
   const state = loadState();
   return state.migrationSources[sourceOrgUrl];
 }
+
+export function clearMigrationSource(sourceOrgUrl: string): void {
+  const state = loadState();
+  delete state.migrationSources[sourceOrgUrl];
+  saveState(state);
+}
