@@ -119,3 +119,13 @@ export function checkPrerequisites(sessionId?: string): {
 
   return { githubSource, githubTarget, ado, details, sessionBased };
 }
+
+/** Resolve the GitHub access token used for Actions Importer operations */
+export function getGitHubAccessToken(sessionId?: string): string {
+  // Prefer the target PAT (has workflow scope needed for creating PRs)
+  try {
+    return getGitHubTargetPAT(sessionId);
+  } catch {
+    return getGitHubSourcePAT(sessionId);
+  }
+}

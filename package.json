@@ -13,15 +13,22 @@
     "start": "node dist/index.js",
     "start:http": "MCP_TRANSPORT=http node dist/index.js"
   },
-  "keywords": ["mcp", "github", "migration", "gei", "enterprise-importer"],
+  "keywords": [
+    "mcp",
+    "github",
+    "migration",
+    "gei",
+    "enterprise-importer"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.25.3",
+    "@modelcontextprotocol/sdk": "^1.27.1",
     "@octokit/graphql": "^9.0.3",
     "cors": "^2.8.5",
     "express": "^4.18.2",
     "node-fetch": "^3.3.2",
+    "yaml": "^2.8.2",
     "zod": "^4.3.6"
   },
   "devDependencies": {

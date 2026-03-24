@@ -4,6 +4,10 @@ import * as github from "../services/github-api.js";
 import * as ado from "../services/ado-api.js";
 import * as state from "../services/state.js";
 import { checkPrerequisites, getGitHubSourcePAT, getADOPAT } from "../services/session.js";
+import { checkActionsImporterPrereqs } from "../services/docker.js";
+import * as actionsImporter from "../services/actions-importer.js";
+import * as adoPipelines from "../services/ado-pipelines.js";
+import * as workflowCopy from "../services/workflow-copy.js";
 
 // Type for the extra context the MCP SDK passes to tool callbacks
 interface ToolExtra {
@@ -19,12 +23,19 @@ export function registerTools(server: McpServer): void {
     {},
     async (_, extra: ToolExtra) => {
       const prereqs = checkPrerequisites(extra.sessionId);
+      const dockerStatus = await checkActionsImporterPrereqs();
       return {
         content: [{
           type: "text",
           text: JSON.stringify({
             ready: prereqs.githubSource && prereqs.githubTarget,
-            ...prereqs
+            ...prereqs,
+            actionsImporter: {
+              dockerRunning: dockerStatus.dockerRunning,
+              cliInstalled: dockerStatus.actionsImporterInstalled,
+              ready: dockerStatus.dockerRunning && dockerStatus.actionsImporterInstalled,
+              details: dockerStatus.details
+            }
           }, null, 2)
         }]
       };
@@ -326,7 +337,10 @@ export function registerTools(server: McpServer): void {
             success: true,
             migrationId,
             message: `Migration started for ${repoName} -> ${targetOrg}/${finalRepoName}`,
-            checkStatus: `Use get_migration_status with migrationId: ${migrationId}`
+            checkStatus: `Use get_migration_status with migrationId: ${migrationId}`,
+            nextStep: source === "ado"
+              ? "After migration completes, use actions_importer_audit or actions_importer_migrate to import ADO pipelines as GitHub Actions workflows."
+              : "After migration completes, use copy_workflows to copy GitHub Actions workflows from the source repo."
           }, null, 2)
         }]
       };
@@ -495,6 +509,303 @@ export function registerTools(server: McpServer): void {
           text: JSON.stringify({
             success: true,
             message: `Migrator role granted to ${actorType.toLowerCase()} '${actor}' in ${org}`
+          }, null, 2)
+        }]
+      };
+    }
+  );
+
+  // ─── GitHub Actions Importer Tools (ADO → GitHub) ─────────────────────────
+
+  // List ADO pipelines
+  server.tool(
+    "list_ado_pipelines",
+    "List all build and release pipelines in an Azure DevOps project",
+    {
+      adoOrg: z.string().describe("Azure DevOps organization name"),
+      adoProject: z.string().describe("Azure DevOps project name")
+    },
+    async ({ adoOrg, adoProject }, extra: ToolExtra) => {
+      const inventory = await adoPipelines.getPipelineInventory(adoOrg, adoProject, extra.sessionId);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            summary: inventory.summary,
+            buildPipelines: inventory.buildPipelines.map(p => ({
+              id: p.id,
+              name: p.name,
+              type: p.process?.type === 2 ? "yaml" : "classic",
+              yamlFile: p.process?.yamlFilename,
+              repository: p.repository?.name,
+            })),
+            releasePipelines: inventory.releasePipelines.map(p => ({
+              id: p.id,
+              name: p.name,
+              environments: p.environments.map(e => e.name),
+            })),
+          }, null, 2)
+        }]
+      };
+    }
+  );
+
+  // Audit ADO pipelines
+  server.tool(
+    "actions_importer_audit",
+    "Audit all pipelines in an Azure DevOps project and report conversion readiness for GitHub Actions (native API, no Docker required)",
+    {
+      adoOrg: z.string().describe("Azure DevOps organization name"),
+      adoProject: z.string().describe("Azure DevOps project name")
+    },
+    async ({ adoOrg, adoProject }, extra: ToolExtra) => {
+      const result = await actionsImporter.auditAdo(adoOrg, adoProject, extra.sessionId);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            summary: result.pipelines,
+            entries: result.entries,
+          }, null, 2)
+        }]
+      };
+    }
+  );
+
+  // Forecast GitHub Actions usage from ADO history
+  server.tool(
+    "actions_importer_forecast",
+    "Forecast GitHub Actions runner usage based on historical ADO pipeline run data (native API, no Docker required)",
+    {
+      adoOrg: z.string().describe("Azure DevOps organization name"),
+      adoProject: z.string().describe("Azure DevOps project name"),
+      startDate: z.string().optional().describe("Start date for historical data (ISO format, e.g. 2025-01-01)")
+    },
+    async ({ adoOrg, adoProject, startDate }, extra: ToolExtra) => {
+      const result = await actionsImporter.forecastAdo(adoOrg, adoProject, startDate, extra.sessionId);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify(result, null, 2)
+        }]
+      };
+    }
+  );
+
+  // Dry-run a single ADO pipeline conversion
+  server.tool(
+    "actions_importer_dry_run",
+    "Convert a single ADO pipeline to a GitHub Actions workflow (preview only, no PR created; native API, no Docker required)",
+    {
+      adoOrg: z.string().describe("Azure DevOps organization name"),
+      adoProject: z.string().describe("Azure DevOps project name"),
+      pipelineId: z.string().describe("The ADO pipeline ID to convert"),
+      pipelineType: z.enum(["pipeline", "release"]).default("pipeline").describe("Pipeline type: build (pipeline) or release")
+    },
+    async ({ adoOrg, adoProject, pipelineId, pipelineType }, extra: ToolExtra) => {
+      const result = await actionsImporter.dryRunAdo(adoOrg, adoProject, pipelineId, pipelineType, extra.sessionId);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            pipelineId: result.pipelineId,
+            suggestedFilename: result.suggestedFilename,
+            convertedWorkflow: result.workflowYaml,
+            warnings: result.warnings,
+            unsupported: result.unsupported,
+            manualSteps: result.manualSteps,
+            note: "This is a preview. Use actions_importer_migrate to create a PR with this workflow."
+          }, null, 2)
+        }]
+      };
+    }
+  );
+
+  // Migrate a single ADO pipeline (creates PR via GitHub API)
+  server.tool(
+    "actions_importer_migrate",
+    "Convert an ADO pipeline to GitHub Actions and create a pull request in the target repo (native API, no Docker required)",
+    {
+      adoOrg: z.string().describe("Azure DevOps organization name"),
+      adoProject: z.string().describe("Azure DevOps project name"),
+      pipelineId: z.string().describe("The ADO pipeline ID to migrate"),
+      targetRepoUrl: z.string().describe("Target GitHub repo URL (e.g. https://github.com/org/repo)"),
+      pipelineType: z.enum(["pipeline", "release"]).default("pipeline").describe("Pipeline type: build (pipeline) or release")
+    },
+    async ({ adoOrg, adoProject, pipelineId, targetRepoUrl, pipelineType }, extra: ToolExtra) => {
+      const result = await actionsImporter.migrateAdoPipeline(adoOrg, adoProject, pipelineId, targetRepoUrl, pipelineType, extra.sessionId);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            success: !!result.pullRequestUrl,
+            pullRequestUrl: result.pullRequestUrl,
+            pipelineId: result.pipelineId,
+            suggestedFilename: result.suggestedFilename,
+            warnings: result.warnings,
+            unsupported: result.unsupported,
+            manualSteps: result.manualSteps,
+            note: result.pullRequestUrl
+              ? "PR created. Review the converted workflow and complete any manual steps listed above."
+              : "Migration completed but no PR URL was detected."
+          }, null, 2)
+        }]
+      };
+    }
+  );
+
+  // CLI-based fallback tools (require Docker + gh-actions-importer)
+  server.tool(
+    "actions_importer_cli_audit",
+    "[CLI fallback] Audit ADO pipelines using the Docker-based gh-actions-importer CLI (requires Docker)",
+    {
+      adoOrg: z.string().describe("Azure DevOps organization name"),
+      adoProject: z.string().optional().describe("Azure DevOps project (omit to audit entire org)")
+    },
+    async ({ adoOrg, adoProject }, extra: ToolExtra) => {
+      const result = await actionsImporter.cli.auditAdo(adoOrg, adoProject, extra.sessionId);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            outputDir: result.outputDir,
+            auditMarkdown: result.rawMarkdown
+          }, null, 2)
+        }]
+      };
+    }
+  );
+
+  server.tool(
+    "actions_importer_cli_dry_run",
+    "[CLI fallback] Convert a single ADO pipeline using the Docker-based gh-actions-importer CLI (requires Docker)",
+    {
+      adoOrg: z.string().describe("Azure DevOps organization name"),
+      adoProject: z.string().describe("Azure DevOps project name"),
+      pipelineId: z.string().describe("The ADO pipeline ID to convert"),
+      pipelineType: z.enum(["pipeline", "release"]).default("pipeline").describe("Pipeline type"),
+      customTransformersPath: z.string().optional().describe("Path to custom Ruby transformer files")
+    },
+    async ({ adoOrg, adoProject, pipelineId, pipelineType, customTransformersPath }, extra: ToolExtra) => {
+      const result = await actionsImporter.cli.dryRunAdo(adoOrg, adoProject, pipelineId, pipelineType, customTransformersPath, extra.sessionId);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            convertedWorkflow: result.workflowYaml,
+            warnings: result.warnings,
+          }, null, 2)
+        }]
+      };
+    }
+  );
+
+  server.tool(
+    "actions_importer_cli_migrate",
+    "[CLI fallback] Migrate an ADO pipeline using the Docker-based gh-actions-importer CLI (requires Docker)",
+    {
+      adoOrg: z.string().describe("Azure DevOps organization name"),
+      adoProject: z.string().describe("Azure DevOps project name"),
+      pipelineId: z.string().describe("The ADO pipeline ID to migrate"),
+      targetRepoUrl: z.string().describe("Target GitHub repo URL"),
+      pipelineType: z.enum(["pipeline", "release"]).default("pipeline").describe("Pipeline type"),
+      customTransformersPath: z.string().optional().describe("Path to custom Ruby transformer files")
+    },
+    async ({ adoOrg, adoProject, pipelineId, targetRepoUrl, pipelineType, customTransformersPath }, extra: ToolExtra) => {
+      const result = await actionsImporter.cli.migrateAdoPipeline(adoOrg, adoProject, pipelineId, targetRepoUrl, pipelineType, customTransformersPath, extra.sessionId);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            success: !!result.pullRequestUrl,
+            pullRequestUrl: result.pullRequestUrl,
+            manualSteps: result.manualSteps,
+          }, null, 2)
+        }]
+      };
+    }
+  );
+
+  // ─── GitHub-to-GitHub Workflow Copy Tools ───────────────────────────────────
+
+  // List workflows in a repo
+  server.tool(
+    "list_repo_workflows",
+    "List GitHub Actions workflow files in a repository's .github/workflows directory",
+    {
+      org: z.string().describe("GitHub organization or owner"),
+      repo: z.string().describe("Repository name")
+    },
+    async ({ org, repo }, extra: ToolExtra) => {
+      const workflows = await workflowCopy.listWorkflows(org, repo, extra.sessionId);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            count: workflows.length,
+            workflows: workflows.map(w => ({
+              name: w.name,
+              path: w.path,
+              size: w.size
+            }))
+          }, null, 2)
+        }]
+      };
+    }
+  );
+
+  // View a specific workflow file
+  server.tool(
+    "view_workflow",
+    "View the content of a specific GitHub Actions workflow file",
+    {
+      org: z.string().describe("GitHub organization or owner"),
+      repo: z.string().describe("Repository name"),
+      path: z.string().default(".github/workflows").describe("Path to the workflow file (e.g. .github/workflows/ci.yml)")
+    },
+    async ({ org, repo, path }, extra: ToolExtra) => {
+      const content = await workflowCopy.getWorkflowContent(org, repo, path, extra.sessionId);
+      if (!content) {
+        return {
+          content: [{ type: "text", text: JSON.stringify({ error: `Workflow not found: ${path}` }) }]
+        };
+      }
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            name: content.name,
+            path: content.path,
+            content: content.content
+          }, null, 2)
+        }]
+      };
+    }
+  );
+
+  // Copy workflows between GitHub repos
+  server.tool(
+    "copy_workflows",
+    "Copy all GitHub Actions workflow files from a source repo to a target repo (GitHub-to-GitHub)",
+    {
+      sourceOrg: z.string().describe("Source GitHub organization"),
+      sourceRepo: z.string().describe("Source repository name"),
+      targetOrg: z.string().describe("Target GitHub organization"),
+      targetRepo: z.string().describe("Target repository name")
+    },
+    async ({ sourceOrg, sourceRepo, targetOrg, targetRepo }, extra: ToolExtra) => {
+      const result = await workflowCopy.copyWorkflows(sourceOrg, sourceRepo, targetOrg, targetRepo, extra.sessionId);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            copied: result.copied,
+            skipped: result.skipped,
+            errors: result.errors,
+            summary: `Copied ${result.copied.length} workflow(s), skipped ${result.skipped.length}, errors ${result.errors.length}`,
+            note: result.copied.length > 0
+              ? "Workflows copied successfully. Review them in the target repo and update any org-specific secrets or environment references."
+              : undefined
           }, null, 2)
         }]
       };
