@@ -607,8 +607,8 @@ function normalizeTaskName(taskRef: string): { key: string; version: number } {
   return { key, version };
 }
 
-/** Convert ADO variable references $(varName) to GH ${{ env.varName }} */
-function convertAdoVariableRefs(value: string): string {
+/** Convert ADO variable references $(varName) to GH ${{ env.varName }} or ${{ secrets.X }}. */
+function convertAdoVariableRefs(value: string, secretNames?: Set<string>): string {
   if (typeof value !== "string") return String(value ?? "");
 
   const predefinedMap: Record<string, string> = {
@@ -632,8 +632,13 @@ function convertAdoVariableRefs(value: string): string {
     const re = new RegExp(`\\$\\(${adoVar.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`, "gi");
     result = result.replace(re, `\${{ ${ghVar} }}`);
   }
-  // Remaining $(VarName) → ${{ env.VarName }}
-  result = result.replace(/\$\(([^)]+)\)/g, (_m, v) => `\${{ env.${v} }}`);
+  // Remaining $(VarName) → ${{ secrets.X }} if known secret, else ${{ env.VarName }}
+  result = result.replace(/\$\(([^)]+)\)/g, (_m, v) => {
+    if (secretNames?.has(v)) {
+      return `\${{ secrets.${v.toUpperCase().replace(/[^A-Z0-9_]/g, "_")} }}`;
+    }
+    return `\${{ env.${v} }}`;
+  });
   return result;
 }
 
@@ -685,31 +690,66 @@ function convertAdoYamlStep(
     };
   }
 
+  // Detect step-level secret env vars: when env maps VAR: $(VAR) (self-referencing), treat as secret
+  const stepSecrets = new Set<string>();
+  if (step.env && typeof step.env === "object") {
+    for (const [k, v] of Object.entries(step.env as Record<string, any>)) {
+      const strVal = String(v);
+      // Self-referencing $(VAR_NAME) means it's pulling from a secret variable
+      if (strVal === `$(${k})`) {
+        stepSecrets.add(k);
+      }
+    }
+  }
+
+  // Build converted env block for script-type steps
+  const buildStepEnv = (): Record<string, string> | undefined => {
+    if (!step.env || typeof step.env !== "object") return undefined;
+    const converted: Record<string, string> = {};
+    for (const [k, v] of Object.entries(step.env as Record<string, any>)) {
+      if (stepSecrets.has(k)) {
+        converted[k] = `\${{ secrets.${k.toUpperCase().replace(/[^A-Z0-9_]/g, "_")} }}`;
+      } else {
+        converted[k] = convertAdoVariableRefs(String(v), stepSecrets);
+      }
+    }
+    return Object.keys(converted).length > 0 ? converted : undefined;
+  };
+
   // script:
   if ("script" in step) {
-    return {
+    const ghStep: Record<string, any> = {
       name: step.displayName || "Run script",
-      run: convertAdoVariableRefs(step.script),
-      ...(step.workingDirectory ? { "working-directory": convertAdoVariableRefs(step.workingDirectory) } : {}),
+      run: convertAdoVariableRefs(step.script, stepSecrets),
+      ...(step.workingDirectory ? { "working-directory": convertAdoVariableRefs(step.workingDirectory, stepSecrets) } : {}),
     };
+    const env = buildStepEnv();
+    if (env) ghStep.env = env;
+    return ghStep;
   }
 
   // bash:
   if ("bash" in step) {
-    return {
+    const ghStep: Record<string, any> = {
       name: step.displayName || "Run bash",
-      run: convertAdoVariableRefs(step.bash),
+      run: convertAdoVariableRefs(step.bash, stepSecrets),
       shell: "bash",
     };
+    const env = buildStepEnv();
+    if (env) ghStep.env = env;
+    return ghStep;
   }
 
   // powershell: / pwsh:
   if ("powershell" in step || "pwsh" in step) {
-    return {
+    const ghStep: Record<string, any> = {
       name: step.displayName || "Run PowerShell",
-      run: convertAdoVariableRefs(step.powershell || step.pwsh),
+      run: convertAdoVariableRefs(step.powershell || step.pwsh, stepSecrets),
       shell: step.pwsh ? "pwsh" : "powershell",
     };
+    const env = buildStepEnv();
+    if (env) ghStep.env = env;
+    return ghStep;
   }
 
   // template:
@@ -748,7 +788,11 @@ function convertAdoYamlStep(
       if (step.env) {
         const converted: Record<string, string> = {};
         for (const [k, v] of Object.entries(step.env as Record<string, any>)) {
-          converted[k] = convertAdoVariableRefs(String(v));
+          if (stepSecrets.has(k)) {
+            converted[k] = `\${{ secrets.${k.toUpperCase().replace(/[^A-Z0-9_]/g, "_")} }}`;
+          } else {
+            converted[k] = convertAdoVariableRefs(String(v), stepSecrets);
+          }
         }
         ghStep.env = converted;
       }
